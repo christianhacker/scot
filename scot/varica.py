@@ -7,6 +7,62 @@ import numpy as np
 from . import backend as scotbackend
 from .datatools import cat_trials, dot_special, atleast_3d
 
+def mvar(x, var, cl=None, reducedim=0.99, optimize_var=False, backend=None,
+            varfit='ensemble', random_state=None):
+    """ Performs VAR model fitting
+    
+    """
+
+    x = atleast_3d(x)
+    t, m, l = np.shape(x)
+
+    if backend is None:
+        backend = scotbackend
+
+    # pre-transform the data with PCA
+    if reducedim == 'no_pca':
+        c = np.eye(m)
+        d = np.eye(m)
+        xpca = x
+    else:
+        c, d, xpca = backend['pca'](x, reducedim)
+
+    if optimize_var:
+        var.optimize(xpca)
+
+    if varfit == 'trial':
+        r = np.zeros(xpca.shape)
+        for i in range(t):
+            # fit MVAR model
+            a = var.fit(xpca[i, :, :])
+            # residuals
+            r[i, :, :] = xpca[i, :, :] - var.predict(xpca[i, :, :])[0, :, :]
+    elif varfit == 'class':
+        r = np.zeros(xpca.shape)
+        for i in np.unique(cl):
+            mask = cl == i
+            a = var.fit(xpca[mask, :, :])
+            r[mask, :, :] = xpca[mask, :, :] - var.predict(xpca[mask, :, :])
+    elif varfit == 'ensemble':
+        # fit MVAR model
+        a = var.fit(xpca)
+        # residuals
+        r = xpca - var.predict(xpca)
+    else:
+        raise ValueError('unknown VAR fitting mode: {}'.format(varfit))
+
+    # driving process
+    e = r.copy()
+
+    class Result:
+        residuals = e
+        var_residuals = r
+        c = np.cov(cat_trials(e).T, rowvar=False)
+
+    Result.a = a
+    Result.xpca = xpca
+        
+    return Result
 
 def mvarica(x, var, cl=None, reducedim=0.99, optimize_var=False, backend=None,
             varfit='ensemble', random_state=None):

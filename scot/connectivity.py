@@ -7,6 +7,7 @@
 """Connectivity analysis"""
 
 import numpy as np
+from opt_einsum import contract as einsum
 import scipy as sp
 from scipy.fftpack import fft
 
@@ -213,8 +214,8 @@ class Connectivity(object):
                                'invertible noise covariance matrix c.')
         A = self.A()
         # TODO: can we do that more efficiently?
-        G = np.einsum('ji..., jk... ->ik...', A.conj(), self.Cinv())
-        G = np.einsum('ij..., jk... ->ik...', G, A)
+        G = einsum('ji..., jk... ->ik...', A.conj(), self.Cinv())
+        G = einsum('ij..., jk... ->ik...', G, A)
         return G
 
     @memoize
@@ -242,7 +243,7 @@ class Connectivity(object):
         """
         S = self.S()
         # TODO: can we do that more efficiently?
-        return S / np.sqrt(np.einsum('ii..., jj... ->ij...', S, S.conj()))
+        return S / np.sqrt(einsum('ii..., jj... ->ij...', S, S.conj()))
 
     @memoize
     def PHI(self):
@@ -267,7 +268,7 @@ class Connectivity(object):
         """
         G = self.G()
         # TODO: can we do that more efficiently?
-        return G / np.sqrt(np.einsum('ii..., jj... ->ij...', G, G))
+        return G / np.sqrt(einsum('ii..., jj... ->ij...', G, G))
 
     @memoize
     def PDC(self):
@@ -327,7 +328,7 @@ class Connectivity(object):
         """
         A = self.A()
         # TODO: can we do that more efficiently?
-        return np.abs(A / np.sqrt(np.einsum('aj..., ab..., bj... ->j...',
+        return np.abs(A / np.sqrt(einsum('aj..., ab..., bj... ->j...',
                                             A.conj(), self.Cinv(), A)))
 
     @memoize
@@ -344,7 +345,7 @@ class Connectivity(object):
         analysis. Comput. Math. Meth. Med. 2012: 140513, 2012.
         """
         A = self.A()
-        tmp = A / np.sqrt(np.einsum('aj..., a..., aj..., ii... ->ij...',
+        tmp = A / np.sqrt(einsum('aj..., a..., aj..., ii... ->ij...',
                                     A.conj(), 1 / np.diag(self.c), A, self.c))
         return np.abs(tmp)
 
@@ -412,7 +413,7 @@ class Connectivity(object):
         analysis. Comput. Math. Meth. Med. 2012: 140513, 2012.
         """
         H = self.H()
-        tmp = H / np.sqrt(np.einsum('ia..., aa..., ia..., j... ->ij...',
+        tmp = H / np.sqrt(einsum('ia..., aa..., ia..., j... ->ij...',
                                     H.conj(), self.c, H,
                                     1 / self.c.diagonal()))
         return np.abs(tmp)

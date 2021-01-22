@@ -9,7 +9,7 @@
 import numpy as np
 from opt_einsum import contract as einsum
 import scipy as sp
-from scipy.fftpack import fft
+from scipy.fft import fft
 
 from .utils import memoize
 

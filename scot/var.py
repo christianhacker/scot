@@ -49,7 +49,7 @@ class VAR(VARBase):
         self.delta = delta
         self.xvschema = xvschema
 
-    def fit(self, data):
+    def fit(self, data, method='lstsq'):
         """Fit VAR model to data.
         
         Parameters
@@ -65,21 +65,16 @@ class VAR(VARBase):
         """
         data = atleast_3d(data)
 
-        if self.delta == 0 or self.delta is None:
-            # ordinary least squares
-            x, y = self._construct_eqns(data)
+        if method == 'lstsq':
+            fit_func = self._fit_lstsq
+        
+        elif method == 'vm':
+            fit_func = self._fit_vm
+
         else:
-            # regularized least squares (ridge regression)
-            x, y = self._construct_eqns_rls(data)
+            raise NotImplementedError(method)
 
-        b, res, rank, s = sp.linalg.lstsq(x, y)
-
-        self.coef = b.transpose()
-
-        self.residuals = data - self.predict(data)
-        self.rescov = sp.cov(cat_trials(self.residuals[:, :, self.p:]))
-
-        return self
+        return fit_func(data)
 
     def optimize_order(self, data, min_p=1, max_p=None):
         """Determine optimal model order by minimizing the mean squared
@@ -214,6 +209,276 @@ class VAR(VARBase):
         """
         return _construct_var_eqns(data, self.p, self.delta)
 
+    def _fit_lstsq(self, data):
+        """
+            Fit VAR model to data using linear least squares method
+        """
+
+        if self.delta == 0 or self.delta is None:
+            # ordinary least squares
+            x, y = self._construct_eqns(data)
+        else:
+            # regularized least squares (ridge regression)
+            x, y = self._construct_eqns_rls(data)
+
+        b, res, rank, s = sp.linalg.lstsq(x, y)
+
+        self.coef = b.transpose()
+
+        self.residuals = data - self.predict(data)
+        self.rescov = sp.cov(cat_trials(self.residuals[:, :, self.p:]))
+
+        return self
+
+    def _fit_vm(self, data):
+        """
+            Compute MVAR coefficients with Viera-Morf algorithm
+
+            Adapted from https://github.com/dokato/connectivipy with permission
+        """
+
+        pmax = self.p
+
+        assert pmax > 0, "pmax > 0"
+
+        n_trials, n_chans, n_points = data.shape
+        cov_func = self.mean_cov
+
+        f, b = data.copy(), data.copy()
+
+        pef = cov_func(data, norm=False)
+        peb =pef.copy()
+
+        arf = np.zeros((n_chans, n_chans, pmax))
+        arb = np.zeros((n_chans, n_chans, pmax))
+
+        for k in range(0, pmax):
+            D = cov_func(f[:, :, k + 1:n_points], 
+                         b[:, :, 0:n_points - k - 1], 
+                         norm=False)
+            arf[:, :, k] = np.dot(D, np.linalg.inv(peb))
+            arb[:, :, k] = np.dot(D.T, np.linalg.inv(pef))
+
+            tmp = f[:, :, k+1:] - np.dot(b[:, :, :n_points - k - 1].transpose(0, 2, 1),
+                                         arf[:, :, k].T).transpose(0, 2, 1)
+            
+            b[:, :, :n_points-k-1] = b[::, :, :n_points-k-1] - np.dot(f[:, :, k+1:].transpose(0, 2, 1), 
+                                                                      arb[:, :, k].T).transpose(0, 2, 1)
+            f[:, :, k+1:] = tmp
+
+            for i in range(k):
+                tmpp = arf[:, :, i] - np.dot(arf[:, :, k], arb[:, :, k-i-1])
+                arb[:, :, k-i-1] = arb[:, :, k-i-1] - np.dot(arb[:, :, k], arf[:, :, i])
+                arf[:, :, i] = tmpp
+            peb = cov_func(b[:, :, :n_points-k-1], norm=False)
+            pef = cov_func(f[:, :, k+1:], norm=False)
+
+        self.coef = arf.reshape(n_chans, n_chans * pmax)
+        self.residuals = data - self.predict(data)
+        self.rescov = sp.cov(cat_trials(self.residuals[:, :, self.p:]))
+
+        return self
+
+    def mean_cov(self, x, y=[], p=0, norm=True):
+        """
+            ADAPTED FROM [1]. Wrapper to multichannel case of new covariance *nconv*
+
+            Args:
+                *x* : numpy.array
+                    data of shape (n_trials, n_channels, n_points)
+                *y* : numpy.array
+                    data array, optional, if not given the autocovariance is returned
+                *p* = 0 : int
+                    window shift of input data. Can be negative
+                *norm* = True: bool
+                    Whether to divide result by length of *x*
+
+            Returns:
+                *mcov* : numpy.array
+                    covariance matrix
+        """
+
+        n_trials = len(x)
+        
+        for trial in range(n_trials):
+            if trial == 0:
+                if not len(y):
+                    mcov = self.ncov(x[trial, ...], p=p, norm=norm)
+                else:
+                    mcov = self.ncov(x[trial, ...], y[trial, ...], p=p, norm=norm)
+                continue
+            if not len(y):
+                mcov += self.ncov(x[trial, ...], p=p, norm=norm)
+            else:
+                mcov += self.ncov(x[trial, ...], y[trial, ...], p=p, norm=norm)
+
+        return mcov / n_trials
+
+    def ncov(self, x, y=[], p=0, norm=True):
+
+        """
+            New covariance
+        """
+
+        n_chans, n_points = x.shape
+
+        cov = np.zeros((n_chans, n_chans, abs(p) + 1))
+
+        if len(y) == 0:
+            y = x
+
+        if p >= 0:
+            for r in range(p+1):
+                cov[:, :, r] = np.dot(x[:, :n_points - r], y[:, r:].T)
+        else:
+            for r in range(abs(p) + 1):
+                idxs = np.arange(-r, x.shape[1] - r)
+                zy = y.take(idxs, axis=1, mode='wrap')
+                cov[:, :, r] = np.dot(x[:, :n_points-r], zy[:, :n_points-r].T)
+
+        if norm:
+            kv = cov / (n_points - 1)
+        else:
+            kv = cov
+
+        if p == 0:
+            kv = np.squeeze(kv)
+
+        return kv
+
+
+class VAR_VM(VARBase):
+    """
+        VAR implementation with Viera-Morf method
+
+        This class provides VAR model fitting with the Viera-Morf algorithm
+
+        References:
+            [1] ConnectiviPy - python module for connectivity analysis
+                https://github.com/dokato/connectivipy
+    """
+
+    def __init__(self, model_order, xvschema=xv.multitrial, n_jobs=1,
+                 verbose=None):
+        super(VAR_VM, self).__init__(model_order=model_order, n_jobs=n_jobs,
+                                  verbose=verbose)
+        self.xvschema = xvschema
+
+    def mean_cov(self, x, y=[], p=0, norm=True):
+        """
+            ADAPTED FROM [1]. Wrapper to multichannel case of new covariance *nconv*
+
+            Args:
+                *x* : numpy.array
+                    data of shape (n_trials, n_channels, n_points)
+                *y* : numpy.array
+                    data array, optional, if not given the autocovariance is returned
+                *p* = 0 : int
+                    window shift of input data. Can be negative
+                *norm* = True: bool
+                    Whether to divide result by length of *x*
+
+            Returns:
+                *mcov* : numpy.array
+                    covariance matrix
+        """
+
+        n_trials = len(x)
+        
+        for trial in range(n_trials):
+            if trial == 0:
+                if not len(y):
+                    mcov = self.ncov(x[trial, ...], p=p, norm=norm)
+                else:
+                    mcov = self.ncov(x[trial, ...], y[trial, ...], p=p, norm=norm)
+                continue
+            if not len(y):
+                mcov += self.ncov(x[trial, ...], p=p, norm=norm)
+            else:
+                mcov += self.ncov(x[trial, ...], y[trial, ...], p=p, norm=norm)
+
+        return mcov / n_trials
+
+    def ncov(self, x, y=[], p=0, norm=True):
+
+        """
+            New covariance
+        """
+
+        n_chans, n_points = x.shape
+
+        cov = np.zeros((n_chans, n_chans, abs(p) + 1))
+
+        if len(y) == 0:
+            y = x
+
+        if p >= 0:
+            for r in range(p+1):
+                cov[:, :, r] = np.dot(x[:, :n_points - r], y[:, r:].T)
+        else:
+            for r in range(abs(p) + 1):
+                idxs = np.arange(-r, x.shape[1] - r)
+                zy = y.take(idxs, axis=1, mode='wrap')
+                cov[:, :, r] = np.dot(x[:, :n_points-r], zy[:, :n_points-r].T)
+
+        if norm:
+            kv = cov / (n_points - 1)
+        else:
+            kv = cov
+
+        if p == 0:
+            kv = np.squeeze(kv)
+
+        return kv
+
+    def fit(self, data):
+        """
+            Compute MVAR coefficients with Viera-Morf algorithm
+        """
+
+        pmax = self.p
+
+        data = atleast_3d(data)
+
+        assert pmax > 0, "pmax > 0"
+
+        n_trials, n_chans, n_points = data.shape
+        cov_func = self.mean_cov
+
+        f, b = data.copy(), data.copy()
+
+        pef = cov_func(data, norm=False)
+        peb =pef.copy()
+
+        arf = np.zeros((n_chans, n_chans, pmax))
+        arb = np.zeros((n_chans, n_chans, pmax))
+
+        for k in range(0, pmax):
+            D = cov_func(f[:, :, k + 1:n_points], 
+                         b[:, :, 0:n_points - k - 1], 
+                         norm=False)
+            arf[:, :, k] = np.dot(D, np.linalg.inv(peb))
+            arb[:, :, k] = np.dot(D.T, np.linalg.inv(pef))
+
+            tmp = f[:, :, k+1:] - np.dot(b[:, :, :n_points - k - 1].transpose(0, 2, 1),
+                                         arf[:, :, k].T).transpose(0, 2, 1)
+            
+            b[:, :, :n_points-k-1] = b[::, :, :n_points-k-1] - np.dot(f[:, :, k+1:].transpose(0, 2, 1), 
+                                                                      arb[:, :, k].T).transpose(0, 2, 1)
+            f[:, :, k+1:] = tmp
+
+            for i in range(k):
+                tmpp = arf[:, :, i] - np.dot(arf[:, :, k], arb[:, :, k-i-1])
+                arb[:, :, k-i-1] = arb[:, :, k-i-1] - np.dot(arb[:, :, k], arf[:, :, i])
+                arf[:, :, i] = tmpp
+            peb = cov_func(b[:, :, :n_points-k-1], norm=False)
+            pef = cov_func(f[:, :, k+1:], norm=False)
+
+        self.coef = arf.reshape(n_chans, n_chans * pmax)
+        self.residuals = data - self.predict(data)
+        self.rescov = sp.cov(cat_trials(self.residuals[:, :, self.p:]))
+
+        return self
 
 def _msge_with_gradient_underdetermined(data, delta, xvschema, skipstep, p):
     """Calculate mean squared generalization error and its gradient for
